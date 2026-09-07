@@ -134,14 +134,22 @@ public class TickExporter implements IStrategy {
         throw last;
     }
 
+    // FIX: در کلاینت standalone خروجی console.getOut() خودش به System.out می‌رود؛
+    // چاپ هر دو باعث تکرار هر خط لاگ می‌شد. اکنون فقط یکی استفاده می‌شود.
     private void log(String msg) {
-        if (console != null) console.getOut().println(msg);
-        System.out.println(msg);
+        if (console != null) {
+            console.getOut().println(msg);
+        } else {
+            System.out.println(msg);
+        }
     }
 
     private void logErr(String msg) {
-        if (console != null) console.getErr().println(msg);
-        System.err.println(msg);
+        if (console != null) {
+            console.getErr().println(msg);
+        } else {
+            System.err.println(msg);
+        }
     }
 
     @Override public void onTick(Instrument instrument, ITick tick) {}
