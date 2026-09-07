@@ -72,3 +72,6 @@ jobs:
           path: out/**
           if-no-files-found: warn
           retention-days: 14
+      - name: Build
+        run: mvn -B -ntp -U clean package
+          
