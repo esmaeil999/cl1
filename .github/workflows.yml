@@ -1,0 +1,74 @@
+name: Export JForex Ticks
+
+on:
+  workflow_dispatch:
+    inputs:
+      instrument:
+        description: "Instrument (e.g. EURUSD, GBPUSD, XAUUSD)"
+        required: true
+        default: "EURUSD"
+      date_from:
+        description: "Start, GMT (yyyy-MM-dd HH:mm:ss)"
+        required: true
+        default: "2010-01-01 00:00:00"
+      date_to:
+        description: "End, GMT (yyyy-MM-dd HH:mm:ss)"
+        required: true
+        default: "2010-02-01 00:00:00"
+      chunk_hours:
+        description: "Hours per history request"
+        required: false
+        default: "6"
+      account_type:
+        description: "DEMO or LIVE"
+        required: false
+        default: "DEMO"
+  # Optional scheduled run using the repo variables/defaults (disabled by default)
+  # schedule:
+  #   - cron: "0 3 * * 1"
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350   # GitHub hard limit for a job is 6h
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 11
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "11"
+          cache: maven
+
+      - name: Build
+        run: mvn -B -ntp clean package
+
+      - name: Run tick export
+        env:
+          DUKASCOPY_USERNAME: ${{ secrets.DUKASCOPY_USERNAME }}
+          DUKASCOPY_PASSWORD: ${{ secrets.DUKASCOPY_PASSWORD }}
+          DUKASCOPY_ACCOUNT_TYPE: ${{ github.event.inputs.account_type || 'DEMO' }}
+          INSTRUMENT: ${{ github.event.inputs.instrument || 'EURUSD' }}
+          DATE_FROM: ${{ github.event.inputs.date_from || '2010-01-01 00:00:00' }}
+          DATE_TO: ${{ github.event.inputs.date_to || '2010-02-01 00:00:00' }}
+          CHUNK_HOURS: ${{ github.event.inputs.chunk_hours || '6' }}
+          SLEEP_MS: "500"
+          GZIP: "true"
+          RUN_TIMEOUT_HOURS: "5"
+        run: java -Xmx2g -jar target/tick-exporter.jar
+
+      - name: Show output files
+        if: always()
+        run: ls -lh out || true
+
+      - name: Upload CSV artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ticks-${{ github.event.inputs.instrument || 'EURUSD' }}-${{ github.run_number }}
+          path: out/**
+          if-no-files-found: warn
+          retention-days: 14
