@@ -14,8 +14,10 @@
     <maven.compiler.source>11</maven.compiler.source>
     <maven.compiler.target>11</maven.compiler.target>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-    <!-- JForex standalone client version. Change if Dukascopy releases a newer one. -->
-    <jforex.version>3.6.24</jforex.version>
+    <!-- FIX: 3.6.24 در مخزن Dukascopy وجود ندارد؛ آخرین نسخه 3.6.51 است -->
+    <jforex.version>3.6.51</jforex.version>
+    <!-- FIX: یکسان‌سازی نسخهٔ SLF4J بین api و binding -->
+    <slf4j.version>1.7.36</slf4j.version>
   </properties>
 
   <repositories>
@@ -23,19 +25,49 @@
       <id>dukascopy-public-repo</id>
       <name>Dukascopy public repository</name>
       <url>https://www.dukascopy.com/client/jforexlib/publicrepo/</url>
+      <!-- FIX: صریح کردن سیاست، تا Maven سراغ snapshot نرود -->
+      <releases>
+        <enabled>true</enabled>
+        <updatePolicy>never</updatePolicy>
+      </releases>
+      <snapshots>
+        <enabled>false</enabled>
+      </snapshots>
     </repository>
   </repositories>
+
+  <dependencyManagement>
+    <dependencies>
+      <!-- FIX: یکسان‌سازی نسخهٔ slf4j-api با binding -->
+      <dependency>
+        <groupId>org.slf4j</groupId>
+        <artifactId>slf4j-api</artifactId>
+        <version>${slf4j.version}</version>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
 
   <dependencies>
     <dependency>
       <groupId>com.dukascopy.dds2</groupId>
       <artifactId>DDS2-jClient-JForex</artifactId>
       <version>${jforex.version}</version>
+      <!-- FIX: حذف binding های تکراری SLF4J -->
+      <exclusions>
+        <exclusion>
+          <groupId>org.slf4j</groupId>
+          <artifactId>slf4j-jdk14</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>org.slf4j</groupId>
+          <artifactId>slf4j-log4j12</artifactId>
+        </exclusion>
+      </exclusions>
     </dependency>
     <dependency>
       <groupId>org.slf4j</groupId>
       <artifactId>slf4j-simple</artifactId>
-      <version>1.7.36</version>
+      <version>${slf4j.version}</version>
     </dependency>
   </dependencies>
 
@@ -66,6 +98,9 @@
                     <exclude>META-INF/*.SF</exclude>
                     <exclude>META-INF/*.DSA</exclude>
                     <exclude>META-INF/*.RSA</exclude>
+                    <!-- FIX: جلوگیری از خرابی fat jar با module-info -->
+                    <exclude>module-info.class</exclude>
+                    <exclude>META-INF/versions/*/module-info.class</exclude>
                   </excludes>
                 </filter>
               </filters>
