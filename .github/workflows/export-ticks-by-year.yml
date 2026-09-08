@@ -18,6 +18,11 @@ on:
         description: "DEMO or LIVE"
         required: false
         default: "DEMO"
+      publish_release:
+        description: "Also publish each year as a GitHub Release asset"
+        required: false
+        type: boolean
+        default: true
 
 env:
   # Dukascopy is behind Cloudflare and 403/404s the default Java user agent.
@@ -36,6 +41,8 @@ jobs:
     needs: prepare
     runs-on: ubuntu-latest
     timeout-minutes: 350
+    permissions:
+      contents: write      # needed to create/update the release
     strategy:
       fail-fast: false
       max-parallel: 2   # be gentle with the Dukascopy history feed
@@ -96,3 +103,33 @@ jobs:
           path: out/**
           if-no-files-found: warn
           retention-days: 14
+
+      # One release per year keeps parallel matrix jobs from racing each other.
+      - name: Publish ${{ matrix.year }} to a GitHub Release
+        if: success() && github.event.inputs.publish_release != 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INSTRUMENT: ${{ github.event.inputs.instrument }}
+          YEAR: ${{ matrix.year }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(out/*)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::warning::out/ is empty, nothing to publish."
+            exit 0
+          fi
+
+          TAG="ticks-${INSTRUMENT}-${YEAR}"
+
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --title "${INSTRUMENT} ticks ${YEAR}" \
+              --notes "Tick export for ${YEAR}, produced by run #${GITHUB_RUN_NUMBER} (${GITHUB_SHA:0:7}).
+
+          - Columns: \`GmtTime,Bid,Ask,BidVolume,AskVolume\`
+          - All timestamps are GMT."
+          fi
+
+          gh release upload "$TAG" "${files[@]}" --clobber
+          echo "Release: $(gh release view "$TAG" --json url -q .url)"
