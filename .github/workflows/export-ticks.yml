@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       instrument:
-        description: "Instrument (e.g. EURUSD, GBPUSD, XAUUSD)"
+        description: "Instrument (e.g. EURUSD, GBPUSD, XAUUSD, BTCUSD)"
         required: true
         default: "EURUSD"
       date_from:
-        description: "Start, GMT (yyyy-MM-dd HH:mm:ss)"
+        description: "Start, GMT (yyyy-MM-dd HH:mm:ss). Crypto history starts ~2018"
         required: true
         default: "2010-01-01 00:00:00"
       date_to:
@@ -27,6 +27,10 @@ on:
   # schedule:
   #   - cron: "0 3 * * 1"
 
+env:
+  # Dukascopy is behind Cloudflare and 403/404s the default Java user agent.
+  JNLP_USER_AGENT: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+
 jobs:
   export:
     runs-on: ubuntu-latest
@@ -44,13 +48,37 @@ jobs:
           cache: maven
 
       - name: Build
-        run: mvn -B -ntp clean package
+        run: mvn -B -ntp -U clean package
+
+      - name: Pre-flight JNLP check
+        id: jnlp
+        env:
+          ACCOUNT_TYPE: ${{ github.event.inputs.account_type || 'DEMO' }}
+        run: |
+          if [ "$ACCOUNT_TYPE" = "LIVE" ]; then
+            URL="https://www.dukascopy.com/client/live/jclient/jforex.jnlp"
+          else
+            URL="https://www.dukascopy.com/client/demo/jclient/jforex.jnlp"
+          fi
+          echo "Probing $URL"
+          curl -sSI -L -A "$JNLP_USER_AGENT" --max-time 30 "$URL" || true
+          CODE=$(curl -s -o /dev/null -w '%{http_code}' -L \
+            -A "$JNLP_USER_AGENT" --max-time 30 "$URL" || echo "000")
+          echo "JNLP HTTP status: $CODE"
+          echo "status=$CODE" >> "$GITHUB_OUTPUT"
+          if [ "$CODE" != "200" ]; then
+            echo "::warning::JNLP descriptor returned HTTP $CODE. Dukascopy is most likely blocking this runner IP (datacenter range). The Java client will still retry; if it fails, run from another network."
+          fi
 
       - name: Run tick export
         env:
           DUKASCOPY_USERNAME: ${{ secrets.DUKASCOPY_USERNAME }}
           DUKASCOPY_PASSWORD: ${{ secrets.DUKASCOPY_PASSWORD }}
           DUKASCOPY_ACCOUNT_TYPE: ${{ github.event.inputs.account_type || 'DEMO' }}
+          DUKASCOPY_JNLP: ${{ vars.DUKASCOPY_JNLP }}
+          DUKASCOPY_JNLP_FALLBACKS: ${{ vars.DUKASCOPY_JNLP_FALLBACKS }}
+          HTTP_USER_AGENT: ${{ env.JNLP_USER_AGENT }}
+          CONNECT_RETRIES: "5"
           INSTRUMENT: ${{ github.event.inputs.instrument || 'EURUSD' }}
           DATE_FROM: ${{ github.event.inputs.date_from || '2010-01-01 00:00:00' }}
           DATE_TO: ${{ github.event.inputs.date_to || '2010-02-01 00:00:00' }}
@@ -72,6 +100,3 @@ jobs:
           path: out/**
           if-no-files-found: warn
           retention-days: 14
-      - name: Build
-        run: mvn -B -ntp -U clean package
-          

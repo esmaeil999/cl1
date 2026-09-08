@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       instrument:
-        description: "Instrument (e.g. EURUSD)"
+        description: "Instrument (e.g. EURUSD, BTCUSD)"
         required: true
         default: "EURUSD"
       years:
@@ -18,6 +18,10 @@ on:
         description: "DEMO or LIVE"
         required: false
         default: "DEMO"
+
+env:
+  # Dukascopy is behind Cloudflare and 403/404s the default Java user agent.
+  JNLP_USER_AGENT: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
 jobs:
   prepare:
@@ -47,13 +51,34 @@ jobs:
           java-version: "11"
           cache: maven
 
-      - run: mvn -B -ntp clean package
+      - run: mvn -B -ntp -U clean package
+
+      - name: Pre-flight JNLP check
+        env:
+          ACCOUNT_TYPE: ${{ github.event.inputs.account_type || 'DEMO' }}
+        run: |
+          if [ "$ACCOUNT_TYPE" = "LIVE" ]; then
+            URL="https://www.dukascopy.com/client/live/jclient/jforex.jnlp"
+          else
+            URL="https://www.dukascopy.com/client/demo/jclient/jforex.jnlp"
+          fi
+          echo "Probing $URL"
+          CODE=$(curl -s -o /dev/null -w '%{http_code}' -L \
+            -A "$JNLP_USER_AGENT" --max-time 30 "$URL" || echo "000")
+          echo "JNLP HTTP status: $CODE"
+          if [ "$CODE" != "200" ]; then
+            echo "::warning::JNLP descriptor returned HTTP $CODE. Dukascopy is most likely blocking this runner IP."
+          fi
 
       - name: Export ${{ matrix.year }}
         env:
           DUKASCOPY_USERNAME: ${{ secrets.DUKASCOPY_USERNAME }}
           DUKASCOPY_PASSWORD: ${{ secrets.DUKASCOPY_PASSWORD }}
           DUKASCOPY_ACCOUNT_TYPE: ${{ github.event.inputs.account_type || 'DEMO' }}
+          DUKASCOPY_JNLP: ${{ vars.DUKASCOPY_JNLP }}
+          DUKASCOPY_JNLP_FALLBACKS: ${{ vars.DUKASCOPY_JNLP_FALLBACKS }}
+          HTTP_USER_AGENT: ${{ env.JNLP_USER_AGENT }}
+          CONNECT_RETRIES: "5"
           INSTRUMENT: ${{ github.event.inputs.instrument }}
           DATE_FROM: ${{ matrix.year }}-01-01 00:00:00
           DATE_TO: ${{ matrix.year }}-12-31 23:59:59
