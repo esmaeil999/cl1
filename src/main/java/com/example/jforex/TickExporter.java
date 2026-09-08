@@ -21,6 +21,13 @@ import java.util.zip.GZIPOutputStream;
  *
  * All settings come from Config (env vars / CLI args) so the same jar can run
  * unchanged inside GitHub Actions.
+ *
+ * IMPORTANT: onStart runs on the single JForex strategy thread, which is also
+ * the thread the platform uses to deliver onTick/onBar callbacks. Doing the
+ * whole download there blocks that thread for hours, so every live bar event
+ * piles up and the platform starts logging
+ * "Strategy thread queue overloaded with tasks". The export therefore runs on
+ * its own worker thread and onStart returns immediately.
  */
 public class TickExporter implements IStrategy {
 
@@ -31,6 +38,7 @@ public class TickExporter implements IStrategy {
     private IConsole console;
     private volatile boolean success = false;
     private volatile long totalTicks = 0;
+    private volatile Thread worker;
 
     public TickExporter(Config config, CountDownLatch finished) {
         this.config = config;
@@ -46,27 +54,57 @@ public class TickExporter implements IStrategy {
     }
 
     @Override
-    public void onStart(IContext context) throws JFException {
+    public void onStart(final IContext context) throws JFException {
         history = context.getHistory();
         console = context.getConsole();
 
+        Instrument instrument = config.getInstrument();
+
+        // Safety net: subscribe from inside the strategy thread using the blocking
+        // overload, so history requests can never run against an unsubscribed
+        // instrument (the cause of "JFException: Instrument [BTC/USD] is not
+        // subscribed"). This is fast, so it is fine to do it here.
+        context.setSubscribedInstruments(Collections.singleton(instrument), true);
+        log("subscribed instruments: " + context.getSubscribedInstruments());
+
+        // Hand the long-running work to our own thread and let onStart return, so
+        // the strategy thread stays free to drain the platform's event queue.
+        worker = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    runExport();
+                } catch (Throwable t) {
+                    success = false;
+                    logErr("Error: " + t);
+                    t.printStackTrace();
+                } finally {
+                    finished.countDown();
+                    try {
+                        context.stop();
+                    } catch (Throwable ignored) {
+                        // the engine may already be shutting down
+                    }
+                }
+            }
+        }, "tick-export");
+        worker.setDaemon(true);
+        worker.start();
+    }
+
+    private void runExport() throws Exception {
+        // JForex timestamps are always GMT based
+        SimpleDateFormat fmt = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS");
+        fmt.setTimeZone(TimeZone.getTimeZone("GMT"));
+
+        final long from = config.getFromMillis();
+        final long to = config.getToMillis();
+        final Instrument instrument = config.getInstrument();
+        final long span = Math.max(1L, to - from);
+        final long startedAt = System.currentTimeMillis();
+
         PrintWriter out = null;
         try {
-            // JForex timestamps are always GMT based
-            SimpleDateFormat fmt = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS");
-            fmt.setTimeZone(TimeZone.getTimeZone("GMT"));
-
-            long from = config.getFromMillis();
-            long to = config.getToMillis();
-            Instrument instrument = config.getInstrument();
-
-            // Second safety net: subscribe from inside the strategy thread using the
-            // blocking overload, so history requests can never run against an
-            // unsubscribed instrument (the cause of
-            // "JFException: Instrument [BTC/USD] is not subscribed").
-            context.setSubscribedInstruments(Collections.singleton(instrument), true);
-            log("subscribed instruments: " + context.getSubscribedInstruments());
-
             out = openWriter();
             out.println("GmtTime,Bid,Ask,BidVolume,AskVolume");
 
@@ -91,31 +129,41 @@ public class TickExporter implements IStrategy {
                     total++;
                 }
 
-                log("chunk: " + fmt.format(new Date(chunkEnd))
-                        + " | ticks: " + ticks.size() + " | total: " + total);
+                long pct = ((chunkEnd - from) * 100L) / span;
+                log("chunk: " + fmt.format(new Date(cursor))
+                        + " -> " + fmt.format(new Date(chunkEnd))
+                        + " | ticks: " + ticks.size()
+                        + " | total: " + total
+                        + " | " + pct + "%");
 
                 cursor = chunkEnd;
-                Thread.sleep(config.getSleepMillis());
+
+                // Only throttle after a chunk that actually returned data. Empty
+                // chunks (weekends, or dates before the instrument's history
+                // starts) cost the server nothing, and sleeping through them was
+                // wasting a large part of the total runtime.
+                if (!ticks.isEmpty() && config.getSleepMillis() > 0) {
+                    Thread.sleep(config.getSleepMillis());
+                }
             }
 
             out.flush();
             totalTicks = total;
             success = true;
+
             if (total == 0) {
                 log("WARNING: 0 ticks were returned. Check that the date range is covered by"
                         + " this instrument's history (crypto tick history starts years later"
                         + " than FX; the default DATE_FROM of 2010 returns nothing for BTC/USD).");
             }
-            log("FINISHED. total ticks = " + total + " -> " + config.getOutFile());
 
-        } catch (Exception e) {
-            success = false;
-            logErr("Error: " + e);
-            e.printStackTrace();
+            long elapsedSec = Math.max(1L, (System.currentTimeMillis() - startedAt) / 1000L);
+            log("FINISHED. total ticks = " + total
+                    + " in " + elapsedSec + "s (" + (total / elapsedSec) + " ticks/s)"
+                    + " -> " + config.getOutFile());
+
         } finally {
             if (out != null) out.close();
-            finished.countDown();
-            context.stop();
         }
     }
 
