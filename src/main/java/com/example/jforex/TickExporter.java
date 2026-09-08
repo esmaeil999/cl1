@@ -9,6 +9,7 @@ import java.io.PrintWriter;
 import java.io.Writer;
 import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
+import java.util.Collections;
 import java.util.Date;
 import java.util.List;
 import java.util.TimeZone;
@@ -59,6 +60,13 @@ public class TickExporter implements IStrategy {
             long to = config.getToMillis();
             Instrument instrument = config.getInstrument();
 
+            // Second safety net: subscribe from inside the strategy thread using the
+            // blocking overload, so history requests can never run against an
+            // unsubscribed instrument (the cause of
+            // "JFException: Instrument [BTC/USD] is not subscribed").
+            context.setSubscribedInstruments(Collections.singleton(instrument), true);
+            log("subscribed instruments: " + context.getSubscribedInstruments());
+
             out = openWriter();
             out.println("GmtTime,Bid,Ask,BidVolume,AskVolume");
 
@@ -93,6 +101,11 @@ public class TickExporter implements IStrategy {
             out.flush();
             totalTicks = total;
             success = true;
+            if (total == 0) {
+                log("WARNING: 0 ticks were returned. Check that the date range is covered by"
+                        + " this instrument's history (crypto tick history starts years later"
+                        + " than FX; the default DATE_FROM of 2010 returns nothing for BTC/USD).");
+            }
             log("FINISHED. total ticks = " + total + " -> " + config.getOutFile());
 
         } catch (Exception e) {
@@ -125,6 +138,15 @@ public class TickExporter implements IStrategy {
         for (int attempt = 1; attempt <= config.getMaxRetries(); attempt++) {
             try {
                 return history.getTicks(instrument, from, to);
+            } catch (JFException e) {
+                last = e;
+                logErr("getTicks failed (attempt " + attempt + "): " + e);
+                // Not-subscribed is a configuration problem, not a transient one:
+                // retrying it only hides the real cause.
+                if (String.valueOf(e.getMessage()).contains("not subscribed")) {
+                    throw e;
+                }
+                Thread.sleep(2000L * attempt);
             } catch (Exception e) {
                 last = e;
                 logErr("getTicks failed (attempt " + attempt + "): " + e);
