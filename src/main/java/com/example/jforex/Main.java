@@ -6,8 +6,12 @@ import com.dukascopy.api.system.ClientFactory;
 import com.dukascopy.api.system.IClient;
 import com.dukascopy.api.system.ISystemListener;
 
+import java.io.IOException;
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
@@ -24,8 +28,25 @@ public class Main {
     /** How long we wait for the server to confirm the instrument subscription. */
     private static final int SUBSCRIBE_TIMEOUT_SECONDS = 30;
 
+    /**
+     * Dukascopy sits behind Cloudflare and answers 403/404 to some clients
+     * (the default "Java/x.y" user agent, datacenter IP ranges). The JDK turns
+     * an HTTP 404 on the JNLP descriptor into a bare
+     * "java.io.FileNotFoundException: https://...jforex.jnlp", so we send a
+     * browser-like UA and log the real status code.
+     */
+    private static final String DEFAULT_USER_AGENT =
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    + "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+
     public static void main(String[] args) throws Exception {
         Config config = Config.fromEnv();
+
+        String userAgent = System.getenv("HTTP_USER_AGENT");
+        if (userAgent == null || userAgent.trim().isEmpty()) {
+            userAgent = DEFAULT_USER_AGENT;
+        }
+        System.setProperty("http.agent", userAgent);
 
         final CountDownLatch strategyFinished = new CountDownLatch(1);
         final IClient client = ClientFactory.getDefaultInstance();
@@ -46,16 +67,13 @@ public class Main {
             }
         });
 
-        System.out.println("Connecting to " + config.getJnlpUrl() + " ...");
-        client.connect(config.getJnlpUrl(), config.getUsername(), config.getPassword());
-
-        int waited = 0;
-        while (!client.isConnected() && waited < 60) {
-            Thread.sleep(1000);
-            waited++;
-        }
-        if (!client.isConnected()) {
-            System.err.println("Failed to connect within 60 seconds. Check credentials/account type.");
+        if (!connectWithRetry(client, config)) {
+            System.err.println("Failed to connect to Dukascopy.");
+            System.err.println("If the JNLP probe above reported 403 or 404, the descriptor is");
+            System.err.println("reachable but this host is being blocked (common for CI and other");
+            System.err.println("datacenter IPs) - run from a different network, or override the URL");
+            System.err.println("with DUKASCOPY_JNLP / DUKASCOPY_JNLP_FALLBACKS.");
+            System.err.println("If it reported 200, the credentials or account type are wrong.");
             System.exit(1);
         }
 
@@ -115,6 +133,90 @@ public class Main {
                 ? "DONE. ticks=" + strategy.getTotalTicks() + " file=" + config.getOutFile()
                 : "FAILED.");
         System.exit(ok ? 0 : 1);
+    }
+
+    /**
+     * Tries every candidate JNLP URL, a few times, with backoff. The descriptor
+     * download is the single most fragile step of the whole run.
+     */
+    private static boolean connectWithRetry(IClient client, Config config) throws InterruptedException {
+        List<String> candidates = jnlpCandidates(config);
+        int maxAttempts = Integer.parseInt(
+                System.getenv().getOrDefault("CONNECT_RETRIES", "5"));
+
+        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+            for (String jnlp : candidates) {
+                System.out.println("Connecting to " + jnlp
+                        + " (attempt " + attempt + "/" + maxAttempts + ") ...");
+
+                int status = probe(jnlp);
+                if (status > 0) {
+                    System.out.println("  JNLP probe HTTP status: " + status);
+                }
+
+                try {
+                    client.connect(jnlp, config.getUsername(), config.getPassword());
+                } catch (Exception e) {
+                    System.err.println("  connect() failed: " + e);
+                    continue;
+                }
+
+                int waited = 0;
+                while (!client.isConnected() && waited < 60) {
+                    Thread.sleep(1000);
+                    waited++;
+                }
+                if (client.isConnected()) {
+                    return true;
+                }
+                System.err.println("  not connected within 60s");
+            }
+
+            if (attempt < maxAttempts) {
+                long backoff = 15_000L * attempt;
+                System.err.println("Retrying in " + (backoff / 1000) + "s ...");
+                Thread.sleep(backoff);
+            }
+        }
+        return false;
+    }
+
+    /** Primary JNLP URL plus optional comma-separated DUKASCOPY_JNLP_FALLBACKS. */
+    private static List<String> jnlpCandidates(Config config) {
+        Set<String> urls = new LinkedHashSet<>();
+        urls.add(config.getJnlpUrl());
+        String extra = System.getenv("DUKASCOPY_JNLP_FALLBACKS");
+        if (extra != null) {
+            for (String candidate : extra.split(",")) {
+                String trimmed = candidate.trim();
+                if (!trimmed.isEmpty()) {
+                    urls.add(trimmed);
+                }
+            }
+        }
+        return new ArrayList<>(urls);
+    }
+
+    /** Returns the HTTP status of the JNLP descriptor, or -1 if unreachable. */
+    private static int probe(String url) {
+        HttpURLConnection conn = null;
+        try {
+            conn = (HttpURLConnection) new URL(url).openConnection();
+            conn.setRequestMethod("GET");
+            conn.setInstanceFollowRedirects(true);
+            conn.setConnectTimeout(15_000);
+            conn.setReadTimeout(15_000);
+            conn.setRequestProperty("User-Agent", System.getProperty("http.agent"));
+            conn.setRequestProperty("Accept", "*/*");
+            return conn.getResponseCode();
+        } catch (IOException e) {
+            System.err.println("  JNLP probe failed: " + e);
+            return -1;
+        } finally {
+            if (conn != null) {
+                conn.disconnect();
+            }
+        }
     }
 
     /** Best-effort list of crypto instruments, to make the error message actionable. */
