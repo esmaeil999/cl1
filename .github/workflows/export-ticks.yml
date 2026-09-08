@@ -23,6 +23,11 @@ on:
         description: "DEMO or LIVE"
         required: false
         default: "DEMO"
+      publish_release:
+        description: "Also publish the output as a GitHub Release asset"
+        required: false
+        type: boolean
+        default: true
   # Optional scheduled run using the repo variables/defaults (disabled by default)
   # schedule:
   #   - cron: "0 3 * * 1"
@@ -35,6 +40,8 @@ jobs:
   export:
     runs-on: ubuntu-latest
     timeout-minutes: 350   # GitHub hard limit for a job is 6h
+    permissions:
+      contents: write      # needed to create/update the release
 
     steps:
       - name: Checkout
@@ -100,3 +107,39 @@ jobs:
           path: out/**
           if-no-files-found: warn
           retention-days: 14
+
+      # Artifacts expire and require a GitHub login to download; a release asset
+      # is permanent and directly downloadable.
+      - name: Publish output to a GitHub Release
+        if: success() && github.event.inputs.publish_release != 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INSTRUMENT: ${{ github.event.inputs.instrument || 'EURUSD' }}
+          DATE_FROM: ${{ github.event.inputs.date_from || '2010-01-01 00:00:00' }}
+          DATE_TO: ${{ github.event.inputs.date_to || '2010-02-01 00:00:00' }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(out/*)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::warning::out/ is empty, nothing to publish."
+            exit 0
+          fi
+
+          FROM_DAY="${DATE_FROM:0:10}"
+          TO_DAY="${DATE_TO:0:10}"
+          TAG="ticks-${INSTRUMENT}-${FROM_DAY}_${TO_DAY}"
+
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --title "${INSTRUMENT} ticks ${FROM_DAY} -> ${TO_DAY}" \
+              --notes "Tick export produced by run #${GITHUB_RUN_NUMBER} (${GITHUB_SHA:0:7}).
+
+          - Instrument: \`${INSTRUMENT}\`
+          - Range (GMT): \`${DATE_FROM}\` -> \`${DATE_TO}\`
+          - Columns: \`GmtTime,Bid,Ask,BidVolume,AskVolume\`
+          - All timestamps are GMT."
+          fi
+
+          gh release upload "$TAG" "${files[@]}" --clobber
+          echo "Release: $(gh release view "$TAG" --json url -q .url)"
